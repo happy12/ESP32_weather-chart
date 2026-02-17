@@ -25,5 +25,6 @@ The PCB has these hardware:
   - Avoid the use of String to limit memory fragmentation
   - Runs the wifi on one core, the other task on the other core, and have regular check from one core to the other to see if one is not responding, and reset if a crash is imminent
  
-PCB files and 3D printable enclosure will be posted shortly 
+PCB files are under 'board' folder
+3D printable enclosure will be posted shortly
  
