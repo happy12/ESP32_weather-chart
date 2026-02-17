@@ -15,7 +15,7 @@ The PCB has these hardware:
 - one on-board RGB LED for status
 
   The code performs these actions:
-  - Fetch the airport data and identify the flight category for the airport (VFR, MVFR, IFR, LIFR)
+  - Fetch the airport data every minute and identify the flight category for the airport (VFR, MVFR, IFR, LIFR)
   - send color signal to the specific LED of the airport and lights up with the appropriate color
   - No light if no flight category is retrieved
   - Wheel: adjust the brightness of the LEDs
