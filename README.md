@@ -26,5 +26,5 @@ The PCB has these hardware:
   - Runs the wifi on one core, the other task on the other core, and have regular check from one core to the other to see if one is not responding, and reset if a crash is imminent
  
 PCB files are under 'board' folder
-3D printable enclosure will be posted shortly
+3D printable enclosure can be downloaded via https://www.printables.com/model/1605885-esp32_weather-chart-enclosure
  
