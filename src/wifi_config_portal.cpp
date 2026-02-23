@@ -24,7 +24,7 @@ Preferences preferences;
 
 WiFiUDP udp;
 static bool udpStarted = false;
-static bool mdnsStarted = false;
+//static bool mdnsStarted = false;
 const uint16_t localPort = 42103;
 
 static EventGroupHandle_t wifiEventGroup = nullptr;
@@ -92,19 +92,22 @@ void stopMDNS() {
 
 void triggerTaskStartMDNS(uint32_t delayMS) {
   // If a save task is already scheduled, cancel it
-  if (mdnsStarted) return;//nothing to do, do not start twice
+  //if (mdnsStarted) return;//nothing to do, do not start twice
+  //note that mdnsStarted is never set to true nor false. Is it uselesss?
 
-    xTimerStart(xTimerCreate(
+    TimerHandle_t t = xTimerCreate(
       "udp_delay",
       pdMS_TO_TICKS(delayMS), // Give the network stack the time to start
       pdFALSE,
       nullptr,
-      [](TimerHandle_t){
+      [](TimerHandle_t self){
         startUDP();
         startMDNS();
-      }
-    ), 0);
-}
+        xTimerDelete(self, 0);//delete itself to avoid leaks
+      });
+    xTimerStart(t, 0);
+}//triggerTaskStartMDNS
+
 //handle event such as disconnect
 void WiFiEvent(WiFiEvent_t event){
   static bool servicesRunning = false;
@@ -207,7 +210,9 @@ bool savePreferences() {
     };
 
     auto saveString = [&](const char* key, const char* value) -> bool {
-      if (strcmp(preferences.getString(key, "").c_str(), value) != 0) {
+      //if (strcmp(preferences.getString(key, "").c_str(), value) != 0) {
+      String stored = preferences.getString(key, "");//unfortunately, need to create a string variable
+      if (strcmp(stored.c_str(), value) != 0) {
         return (preferences.putString(key, value) == strlen(value));
       }
       return true;// nothing to do, but still OK
@@ -806,7 +811,7 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
 
   //the following line is for a dashboard, and can be ommitted if the device does not need to show data or take input from/to user:
   server.on("/saveAirports", HTTP_POST, 
-            [](AsyncWebServerRequest *request) {request->send(200, "text/plain", "Settings saved");},
+            [](AsyncWebServerRequest *request) {},
             NULL, // No upload handler
             [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
 
@@ -893,7 +898,6 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
           strlcpy(api_keyFlightCategory, temp_api_keyFlightCategory, sizeof(api_keyFlightCategory));
           strlcpy(api_keyICAOid, temp_api_keyICAOid, sizeof(api_keyICAOid));
           xSemaphoreGive(xMutex);
-          request->send(200, "text/plain", "OK");
           DEBUG_PRINTLN("Done!");
 
           DEBUG_PRINT("Refreshing Time Server...");
@@ -901,9 +905,9 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
           DEBUG_PRINTLN("Done!");
 
           triggerTaskSavePreference(1500);
-          ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));//Wait for save to complete
-
+          //ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1500));//Wait for save to complete. No need since save is async already
           request->send(200, "text/plain", "Settings saved");
+
         }//mutex
         else {
           DEBUG_PRINTLN("Failed to acquire mutex");

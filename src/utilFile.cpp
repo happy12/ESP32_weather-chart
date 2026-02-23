@@ -97,7 +97,8 @@ bool checkLittleFS(size_t &total, size_t &used, size_t &free)
 void checkRAM(size_t &total, size_t &used, size_t &free)
 {
   total = ESP.getHeapSize();//in bytes
-  free = ESP.getMinFreeHeap();//in bytes getMinFreeHeap getFreeHeap
+  //free = ESP.getMinFreeHeap();//in bytes returns the historical minimum, not the current free heap
+  free = ESP.getFreeHeap();//in bytes, current free heap state
   if (free > total) used = 0;
   else used = total - free;
 }

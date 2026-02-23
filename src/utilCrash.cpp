@@ -7,6 +7,7 @@
 #include "utilFile.h"
 
 const char* filename_crash_report   = "/crash_log.txt";
+static const uint8_t MAX_CRASH_LOG_RECORDS = 10; // file is capped at this many records; oldest is dropped when full
 RTC_DATA_ATTR CrashData crashLog;
 RTC_DATA_ATTR bool hasCrashFlag = false;//init once and never on soft-reset (esp.restart)
 RTC_DATA_ATTR int bootCount = 0;//init once and never on soft-reset (esp.restart)
@@ -15,42 +16,74 @@ volatile uint32_t mainCoreHeartbeat = 0;//for heapguard core checker
 
 
 bool writeCrashLog(CrashData &data, const char *filename) {
-  
-  const size_t bytesNeeded = sizeof(CrashData);
-  const size_t margin=1024;//margin extra free space in bytes
-  size_t bytesWritten=0;
 
-  //write the log
-  if (xSemaphoreTake(filesystemMutex, pdMS_TO_TICKS(30)) == pdTRUE) {
-    size_t freeSpace = LittleFS.totalBytes() - LittleFS.usedBytes();//check for space first, wihtin the same mutex
-    if (freeSpace < (bytesNeeded + margin)) {
-      xSemaphoreGive(filesystemMutex);
-      DEBUG_PRINTLN("Write Crash Log ABORTED: Not enough space on LittleFS!");
-      return false;
-    }//freeSpace
-    File file = LittleFS.open(filename, "a"); //w to overwrite, a to append
-    if (!file) {
-      xSemaphoreGive(filesystemMutex);
-      DEBUG_PRINTLN("Write Crash Log ABORTED: open failed");
-      return false;
-    }//file
-    bytesWritten = file.write((const uint8_t*)&data, sizeof(CrashData));
-    file.close();
-    xSemaphoreGive(filesystemMutex);
-  } else {
+  const size_t recordSize = sizeof(CrashData);
+  const size_t margin = 1024;
+  size_t bytesWritten = 0;
+
+  if (xSemaphoreTake(filesystemMutex, pdMS_TO_TICKS(30)) != pdTRUE) {
     DEBUG_PRINTLN("Write Crash Log ABORTED: filesystemMutex timeout");
     return false;
   }
 
-  // Verify if all data was actually written to the physical chip
-  if ((bytesWritten == bytesNeeded)&&(bytesWritten>0)) {
-      DEBUG_PRINT("Write Log Succesful! bytes: "); DEBUG_PRINTLN(bytesWritten);
-      return true;
-  } else {
-      DEBUG_PRINTLN("Write Crash Log FAIL: Partial Write");
-      return false;
+  size_t freeSpace = LittleFS.totalBytes() - LittleFS.usedBytes();
+  if (freeSpace < (recordSize + margin)) {
+    xSemaphoreGive(filesystemMutex);
+    DEBUG_PRINTLN("Write Crash Log ABORTED: Not enough space on LittleFS!");
+    return false;
   }
-  return false;
+
+  // Count how many records exist already
+  size_t existingCount = 0;
+  if (LittleFS.exists(filename)) {
+    File f = LittleFS.open(filename, "r");
+    if (f) { existingCount = f.size() / recordSize; f.close(); }
+  }
+
+  if (existingCount < MAX_CRASH_LOG_RECORDS) {
+    // File is not full yet: simple append
+    File file = LittleFS.open(filename, "a");
+    if (!file) {
+      xSemaphoreGive(filesystemMutex);
+      DEBUG_PRINTLN("Write Crash Log ABORTED: open failed");
+      return false;
+    }
+    bytesWritten = file.write((const uint8_t*)&data, recordSize);
+    file.close();
+  } else {
+    // File is full: read records 1..N-1 (skip oldest), overwrite file, append new
+    DEBUG_PRINTF("Crash log full (%d records). Rotating oldest out.\n", MAX_CRASH_LOG_RECORDS);
+    CrashData buffer[MAX_CRASH_LOG_RECORDS - 1];
+    File rFile = LittleFS.open(filename, "r");
+    if (!rFile) {
+      xSemaphoreGive(filesystemMutex);
+      DEBUG_PRINTLN("Write Crash Log ABORTED: rotation read failed");
+      return false;
+    }
+    rFile.seek(recordSize); // skip the oldest record
+    rFile.read((uint8_t*)buffer, recordSize * (MAX_CRASH_LOG_RECORDS - 1));
+    rFile.close();
+
+    File wFile = LittleFS.open(filename, "w"); // overwrite
+    if (!wFile) {
+      xSemaphoreGive(filesystemMutex);
+      DEBUG_PRINTLN("Write Crash Log ABORTED: rotation write failed");
+      return false;
+    }
+    wFile.write((const uint8_t*)buffer, recordSize * (MAX_CRASH_LOG_RECORDS - 1));
+    bytesWritten = wFile.write((const uint8_t*)&data, recordSize);
+    wFile.close();
+  }
+
+  xSemaphoreGive(filesystemMutex);
+
+  if ((bytesWritten == recordSize) && (bytesWritten > 0)) {
+    DEBUG_PRINT("Write Log Succesful! bytes: "); DEBUG_PRINTLN(bytesWritten);
+    return true;
+  } else {
+    DEBUG_PRINTLN("Write Crash Log FAIL: Partial Write");
+    return false;
+  }
 }//writeCrashLog
 
 bool readCrashLog(CrashData &crashRecord, const char *filename) {
@@ -140,8 +173,8 @@ void triggerCrashReport(uint8_t code, const char* logMsg) {
   strncpy(crashLog.taskName, currentTask ? currentTask : "Unknown", sizeof(crashLog.taskName)-1);
 
   crashLog.freeHeap = ESP.getFreeHeap();
-  crashLog.fragmentation = 100.0f * ((float)ESP.getMaxAllocHeap() / ESP.getFreeHeap());
-  //crashLog.fragmentation = 100.0f *  (1.0f - ((float)ESP.getMaxAllocHeap() / ESP.getFreeHeap()));
+  //crashLog.fragmentation = 100.0f * ((float)ESP.getMaxAllocHeap() / ESP.getFreeHeap());
+  crashLog.fragmentation = 100.0f *  (1.0f - ((float)ESP.getMaxAllocHeap() / ESP.getFreeHeap()));
   crashLog.uptimeMillis = millis();
 
   //memset(crashLog.message, 0, sizeof(crashLog.message));
@@ -161,7 +194,8 @@ void triggerCrashReport(uint8_t code, const char* logMsg) {
 void checkMemoryHealth(const float &maxFrag) {
   size_t totalFree = ESP.getFreeHeap();
   size_t largestBlock = ESP.getMaxAllocHeap(); 
-  float fragmentation = 100.0 * ((float)largestBlock / totalFree);
+  //float fragmentation = 100.0 * ((float)largestBlock / totalFree);
+  float fragmentation = 100.0f * (1.0f - ((float)largestBlock / (float)totalFree));//large value (higher than 80.0) is bad
 
   if (fragmentation > maxFrag) {
     triggerCrashReport(1,"High Fragmentation");

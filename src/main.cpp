@@ -466,6 +466,7 @@ void adjustPower(float avgRssi) {
 //the wifiRSSiMonitorTask is a task to check for wifi signal strenght, and adjust the ESP32 power to adequate level (to save power/battery)
 void wifiRSSiMonitorTask(void *pvParameters) {
   const TickType_t xDelayRSSI = pdMS_TO_TICKS(1UL * 60UL * 1000UL);//1 minute
+  static uint32_t disconnectedMinutes = 0;// a "stuck disconnected" counter
   const int SAMPLE_SIZE = 10;
   int rssiSamples[SAMPLE_SIZE];
   int sampleIndex = 0;
@@ -507,15 +508,26 @@ void wifiRSSiMonitorTask(void *pvParameters) {
             adjustPower(avgRssi);//Adjust based on average
           }
         }//if connected
-        else if ((WiFi.getMode() == WIFI_AP)||(WiFi.status() == WL_DISCONNECTED)){
+        else if (WiFi.getMode() == WIFI_STA && WiFi.status() != WL_CONNECTED) {
+          disconnectedMinutes++;
+          if (disconnectedMinutes >= 3) { // disconnected for 3+ minutes
+            disconnectedMinutes = 0;
+            WiFi.disconnect();      // reset the driver state cleanly
+            //WiFi.reconnect();  // or re-call WiFi.begin(ssid, pwd)
+            WiFi.begin();           // re-attempt with cached credentials
+          } 
+        }//if not connected
+        else if (WiFi.getMode() == WIFI_AP){
           pingFailCount = 0;
+          disconnectedMinutes = 0;
           WiFi.setTxPower(WIFI_POWER_19_5dBm);//max power since we are in AP mode, or we are disconnected and the reconnect will have better chanve if higher power
           if (WiFi.scanComplete() < 0) {//-2 = WIFI_SCAN_RUNNING, -1= fail; just so that we scan new wifi network and be ready to go for the portal page
             WiFi.scanNetworks(true); // async
           }
-        }
+        }//if in AP mode
         else{
           pingFailCount = 0;
+          disconnectedMinutes = 0;
         }
 
         vTaskDelay(xDelayRSSI); // This puts the task into a "Blocked" state, using 0% CPU.
