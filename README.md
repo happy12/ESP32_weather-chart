@@ -11,7 +11,7 @@ The PCB has these hardware:
 - one input for 5V wall-wart barrel connector
 - 3 wire output for the WS2818 LED daisy chain (GND-5V and one control wire)
 - one thumbwheel used for brightness control
-- one optional switch for user option
+- one optional switch for user option (currently not implemented)
 - one on-board RGB LED for status
 
   The code performs these actions:
