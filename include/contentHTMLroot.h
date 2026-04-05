@@ -174,16 +174,6 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
         <input type="checkbox" id="apiIsComma" class="option-checkbox" checked />
       </div>
 
-      <div class="option-row">
-        <label class="option-label" for="apiKeyICAOid">ICAO ID Key:</label>
-        <input type="text" id="apiKeyICAOid" class="option-input" placeholder="e.g., icaoId" />
-      </div>
-
-      <div class="option-row">
-        <label class="option-label" for="apiKeyFlightCategory">Flight Category Key:</label>
-        <input type="text" id="apiKeyFlightCategory" class="option-input" placeholder="e.g., fltCat" />
-      </div>
-
       <div class="action-buttons">
       <button class="reset-btn" id="resetBtnOptionsAPI">Reset API Options to Default</button>
       </div>
@@ -204,6 +194,7 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
   
 
   <p id='clock' style='color:#666;' class='text-center'> Fetching time...</p>
+  <p style='color:#aaa; font-size:0.8rem; margin-top:20px;'>Developed by Mathieu Fr&eacute;geau</p>
   
   <script>
     const airportList = document.getElementById('airportList');
@@ -214,8 +205,6 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
     const messageEl = document.getElementById('message');
     const apiUrlInput = document.getElementById('apiUrl');
     const apiIsCommaCheckbox = document.getElementById('apiIsComma');
-    const apiKeyFlightCategoryInput = document.getElementById('apiKeyFlightCategory');
-    const apiKeyICAOidInput = document.getElementById('apiKeyICAOid');
     const timezoneSelect = document.getElementById('timezoneSelect');
     const isResetDailyCheckbox = document.getElementById('isResetDaily');
     const resetHourSelect = document.getElementById('resetHourSelect');
@@ -231,9 +220,7 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
     };
     let optionsAPI = {
       apiUrl: '',
-      apiIsComma: true,
-      apiKeyICAOid: '',
-      apiKeyFlightCategory: ''
+      apiIsComma: true
     };
 
   function fetchTime() {
@@ -279,8 +266,6 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
         airports = (data.codes || []).map(code => ({ code, editing: false }));
 
         apiUrlInput.value = data.api_url || '';
-        apiKeyICAOidInput.value = data.api_keyICAOid || '';
-        apiKeyFlightCategoryInput.value = data.api_keyFlightCategory || '';
         apiIsCommaCheckbox.checked = data.isApiUseComma ?? false;
         timezoneSelect.value = data.timezone ?? 0;
         isResetDailyCheckbox.checked = data.isResetDaily ?? true;
@@ -321,8 +306,6 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
             optionsAPI = JSON.parse(savedOptionsAPI);
             apiUrlInput.value = optionsAPI.apiUrl || '';
             apiIsCommaCheckbox.checked = optionsAPI.apiIsComma !== undefined ? optionsAPI.apiIsComma : false;
-            apiKeyFlightCategoryInput.value = optionsAPI.apiKeyFlightCategory || '';
-            apiKeyICAOidInput.value = optionsAPI.apiKeyICAOid || '';
         } catch (e) {
             console.warn('Error parsing saved optionsAPI:', e);
         }
@@ -428,8 +411,6 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
 
       optionsAPI.apiUrl = apiUrlInput.value.trim();
       optionsAPI.apiIsComma = apiIsCommaCheckbox.checked;
-      optionsAPI.apiKeyFlightCategory = apiKeyFlightCategoryInput.value.trim();
-      optionsAPI.apiKeyICAOid = apiKeyICAOidInput.value.trim();
       options.timezone = parseInt(timezoneSelect.value);
       options.isResetDaily = isResetDailyCheckbox.checked;
       options.resetHour = parseInt(resetHourSelect.value);
@@ -443,8 +424,6 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
                 codes: validAirports.map(a => a.code),
                 apiUrl: optionsAPI.apiUrl,
                 apiIsComma: optionsAPI.apiIsComma,
-                apiKeyFlightCategory: optionsAPI.apiKeyFlightCategory,
-                apiKeyICAOid: optionsAPI.apiKeyICAOid,
                 timezone: options.timezone,
                 isResetDaily: options.isResetDaily,
                 resetHour: options.resetHour,
@@ -486,14 +465,10 @@ const char contentHTMLroot[] PROGMEM = R"rawliteral(
       if (confirm('Are you sure you want to reset the API Options to Default?')) {
           optionsAPI = {
               apiUrl: 'https://aviationweather.gov/api/data/metar?format=json&taf=false&ids=',
-              apiIsComma: true,
-              apiKeyICAOid: 'icaoId',
-              apiKeyFlightCategory: 'fltCat'
+              apiIsComma: true
           };
 
           apiUrlInput.value = optionsAPI.apiUrl || '';
-          apiKeyFlightCategoryInput.value = optionsAPI.apiKeyFlightCategory || '';
-          apiKeyICAOidInput.value = optionsAPI.apiKeyICAOid || '';
           apiIsCommaCheckbox.checked = optionsAPI.apiIsComma ?? false;
 
           localStorage.setItem('airportOptionsAPI', JSON.stringify(optionsAPI));

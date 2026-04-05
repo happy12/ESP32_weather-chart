@@ -44,6 +44,22 @@ const char contentHTMLportal[] PROGMEM = R"rawliteral(
             btn.disabled = false; // Always re-enable the button
           }
         }
+
+        function refreshMac() {
+          fetch('/mac')
+            .then(response => {
+              console.log('Fetch Mac:', response.status);
+              return response.text();
+            })
+            .then(data => {
+              if (data !== "") {
+                console.log('Mac fetched:', data);
+                document.getElementById("mac").textContent = data;
+              }
+            })
+            .catch(err => console.warn('Mac Fetch error:', err));
+        }
+
         window.onload = function() {
           var ua = navigator.userAgent;
           var type = 'Generic User';
@@ -57,10 +73,13 @@ const char contentHTMLportal[] PROGMEM = R"rawliteral(
 
       <h2 style='text-align: center;'>Network Wifi Setup (<span id='device-display'>...</span>)</h2>
       <h2>Select Your Wi-Fi</h2>
+      <p>MAC: <span id="mac">--</span></p>
 
       <form action='/save' method='POST'>
 
-      SSID:<br><select name='ssid'>...</select>
+      SSID:<br>
+      <select name='ssid_scan' onchange="document.getElementById('ssid_input').value=this.value;">...</select>
+      <input type='text' id='ssid_input' name='ssid' placeholder='Select above or type SSID manually' autocomplete='off' autocorrect='off' autocapitalize='none' spellcheck='false'>
     
       Password:<br><input type='password' id='pw' name='password' placeholder='Password'>
     
@@ -73,6 +92,7 @@ const char contentHTMLportal[] PROGMEM = R"rawliteral(
       </form>
 
     <button type="button" class='refresh-btn' onclick='refreshWiFi()' style='margin-top:10px;'>Refresh WiFi Network List</button>
+    <p style='text-align:center; color:#aaa; font-size:0.8rem; margin-top:30px;'>Developed by Mathieu Fr&eacute;geau</p>
     </body></html>
     )rawliteral";
 

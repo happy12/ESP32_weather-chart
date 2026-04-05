@@ -14,30 +14,44 @@
 
 
 #define MAX_SSID_LIST 20
-
-
-static TaskHandle_t saveTaskHandle = nullptr;
-
-DNSServer dnsServer;
-static AsyncWebServer server(80);
-Preferences preferences;
-
-WiFiUDP udp;
-static bool udpStarted = false;
-//static bool mdnsStarted = false;
-const uint16_t localPort = 42103;
-
-static EventGroupHandle_t wifiEventGroup = nullptr;
 #define WIFI_CONNECTED_BIT BIT0
 
+// Wraps a WiFiClient stream so that read() blocks (with yields) until a byte
+// arrives or the connection closes / timeout expires.  This prevents ArduinoJson
+// from treating the gaps between TLS decrypt records as EOF (IncompleteInput).
+class BlockingStream : public Stream {
+public:
+    BlockingStream(WiFiClient& s, unsigned long timeoutMs)
+        : _s(s), _deadline(millis() + timeoutMs) {}
+    int available() override { return _s.available(); }
+    int peek()      override { return _s.peek(); }
+    size_t write(uint8_t) override { return 0; }
+    int read() override {
+        while (!_s.available()) {
+            if (millis() > _deadline || !_s.connected()) return -1;
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+        return _s.read();
+    }
+private:
+    WiFiClient& _s;
+    unsigned long _deadline;
+};
+
+Preferences preferences;
+DNSServer dnsServer;
+static AsyncWebServer server(80);
+WiFiUDP udp;
+static bool udpStarted = false;
+const uint16_t localPort = 42103;
+static EventGroupHandle_t wifiEventGroup = nullptr;
+static TimerHandle_t saveTimer = nullptr;
 char mdnsHostname[32]; //will contain the mdns hostname
 
 void setWifiHostname(const char* name) {
     strncpy(mdnsHostname, name, sizeof(mdnsHostname) - 1);
     mdnsHostname[sizeof(mdnsHostname) - 1] = '\0'; // Ensure null termination
 }
-
-
 
 void initWifiEventGroup() {
     if (!wifiEventGroup) {
@@ -52,7 +66,6 @@ void initWiFi() {
         registered = true;
     }
 };
-
 
 void startUDP() {
     if (!udpStarted) {
@@ -81,7 +94,11 @@ void startMDNS() {
       MDNS.addServiceTxt("http", "tcp", "board", ESP.getChipModel());//add info for the router to know
       MDNS.addServiceTxt("http", "tcp", "version", charFirmwareVersion);//add info for the router to know
       MDNS.addServiceTxt("http", "tcp", "description", charDescription);
+      MDNS.addServiceTxt("http", "tcp", "project", charDescription);
+      MDNS.addServiceTxt("http", "tcp", "name", charDescription);
       MDNS.addServiceTxt("http", "tcp", "author", charAuthor);
+      //MDNS.addServiceTxt("http", "tcp", "manufacturer", charAuthor);
+      //MDNS.addService("workstation", "tcp", 9);
       DEBUG_PRINTF("mDNS responder started: %s.local",mdnsHostname);
     }
   }//mdnsHostname    
@@ -91,9 +108,6 @@ void stopMDNS() {
 }
 
 void triggerTaskStartMDNS(uint32_t delayMS) {
-  // If a save task is already scheduled, cancel it
-  //if (mdnsStarted) return;//nothing to do, do not start twice
-  //note that mdnsStarted is never set to true nor false. Is it uselesss?
 
     TimerHandle_t t = xTimerCreate(
       "udp_delay",
@@ -133,46 +147,41 @@ void WiFiEvent(WiFiEvent_t event){
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       DEBUG_PRINTLN("WiFi lost connection (Arduino event). Reconnecting...");
       xEventGroupClearBits(wifiEventGroup, WIFI_CONNECTED_BIT);
-      /*if (servicesRunning) {
+      if (servicesRunning) {
         stopUDP();
-        stopServer();//never stop a server?
+        // stopServer() intentionally omitted â€” AsyncWebServer must stay up
         stopMDNS();
         servicesRunning = false;
-      }*/
+      }
       break;
     default:
       break;
   }//switch
 }//WiFiEvent
 
-
-void triggerTaskSavePreference(uint32_t delayMS){
-  
-  // If a save task is already scheduled, cancel it
-  if (saveTaskHandle != nullptr) {
-    vTaskDelete(saveTaskHandle);
-    saveTaskHandle = nullptr;
+// Runs in the FreeRTOS timer service task â€” single-threaded, no concurrent access possible.
+static void saveTimerCallback(TimerHandle_t xTimer) {
+  DEBUG_PRINTLN("Saving preferences in background...");
+  if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+    savePreferences();
+    xSemaphoreGive(xMutex);
+  } else {
+    DEBUG_PRINTLN("Save preferences failed: Mutex timeout.");
   }
+}
 
-  // 1. We pass '[]' (no capture). A lambda with no capture CAN be converted to a function pointer.
-  // 2. We cast delayMS to (void*) so FreeRTOS can carry it.
-  xTaskCreate([](void* arg){
-    uint32_t d = (uint32_t)arg;
-    vTaskDelay(pdMS_TO_TICKS(d));// Give the network stack 1000ms to clear the transmission buffer
-
-    // CRITICAL: Protect the save process with your Mutex
-    DEBUG_PRINTLN("Saving preferences in background...");
-    if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-        savePreferences();
-        xSemaphoreGive(xMutex);
-        vTaskDelay(pdMS_TO_TICKS(1000));//wait one more second
-    } else {
-        DEBUG_PRINTLN("Save preferences failed: Mutex timeout.");
-    }//else
-    saveTaskHandle = nullptr;
-    vTaskDelete(NULL); // Task self-terminates to free memory
-  }, "deferred_save", 3072, (void*)delayMS, 1, &saveTaskHandle);
+// xTimerChangePeriod() atomically starts the timer if dormant, or resets the
+// countdown if already running â€” safe to call from any task context.
+void triggerTaskSavePreference(uint32_t delayMS){
+  if (saveTimer == nullptr) {
+    saveTimer = xTimerCreate("deferred_save", pdMS_TO_TICKS(delayMS), pdFALSE, nullptr, saveTimerCallback);
+  }
+  if (saveTimer != nullptr) {
+    xTimerChangePeriod(saveTimer, pdMS_TO_TICKS(delayMS), 0); // starts or resets
+  }
 }//triggerTaskSavePreference
+
+
 
 bool savePreferences() {
   bool ok = true;
@@ -210,9 +219,9 @@ bool savePreferences() {
     };
 
     auto saveString = [&](const char* key, const char* value) -> bool {
-      //if (strcmp(preferences.getString(key, "").c_str(), value) != 0) {
-      String stored = preferences.getString(key, "");//unfortunately, need to create a string variable
-      if (strcmp(stored.c_str(), value) != 0) {
+      char stored[128] = {0};
+      preferences.getString(key, stored, sizeof(stored));
+      if (strcmp(stored, value) != 0) {
         return (preferences.putString(key, value) == strlen(value));
       }
       return true;// nothing to do, but still OK
@@ -223,19 +232,13 @@ bool savePreferences() {
     ok &= saveUInt8("timezone", i_timeZone);
     ok &= saveBool("apiComma", isApiUseComma);
     ok &= saveString("apiUrl", api_url);
-    ok &= saveString("apiKeyCat", api_keyFlightCategory);
-    ok &= saveString("apiICAOid", api_keyICAOid);
     ok &= saveBool("resetDaily", isResetDaily);
     ok &= saveUInt8("resetHour", reset_localHour);
     ok &= saveUInt8("resetMinute", reset_localMinute);
 
+    // vector<Airport> is contiguous — write directly from its buffer, no heap alloc needed
     size_t dataSize = airportlist.size() * sizeof(Airport);
-    uint8_t* buffer = new uint8_t[dataSize];
-    for (size_t i = 0; i < airportlist.size(); i++) {
-      memcpy(buffer + (i * sizeof(Airport)), &airportlist[i], sizeof(Airport));
-    }//for
-    size_t written = preferences.putBytes("list", buffer, dataSize);
-    delete[] buffer;
+    size_t written = preferences.putBytes("list", airportlist.data(), dataSize);
 
     /*ok &= saveBool("isAxisValues", isShowAxisValues);
     ok &= saveUInt8("tempUnit", temperatureUnit);
@@ -260,36 +263,13 @@ bool loadPreferences()
     reset_localMinute = preferences.getUChar("resetMinute", 0);
     len = preferences.getString("apiUrl", api_url, sizeof(api_url));
     if (len == 0) strlcpy(api_url, "https://aviationweather.gov/api/data/metar?format=json&taf=false&ids=", sizeof(api_url));
-    len = preferences.getString("apiKeyCat", api_keyFlightCategory, sizeof(api_keyFlightCategory));
-    if (len == 0) strlcpy(api_keyFlightCategory, "fltCat", sizeof(api_keyFlightCategory));
-    len = preferences.getString("apiICAOid", api_keyICAOid, sizeof(api_keyICAOid));
-    if (len == 0) strlcpy(api_keyICAOid, "icaoId", sizeof(api_keyICAOid));
 
     size_t dataSize = preferences.getBytesLength("list");
     if (dataSize > 0) {
-      uint8_t* buffer = new uint8_t[dataSize];
-      preferences.getBytes("list", buffer, dataSize);
       size_t numAirports = dataSize / sizeof(Airport);
-      airportlist.reserve(numAirports);
-      for (size_t i = 0; i < numAirports; i++) {
-        Airport a;
-        memcpy(&a, buffer + (i * sizeof(Airport)), sizeof(Airport));
-        airportlist.push_back(a);
-      }//for
-      delete[] buffer;
+      airportlist.resize(numAirports);
+      preferences.getBytes("list", airportlist.data(), dataSize);
     }//if dataSize > 0
-
-    /*temperatureUnit = preferences.getUChar("tempUnit", 1);//1=celcius, 2=farenheit, 3=kelvin, 4=rankin
-    period_sampling = preferences.getUChar("samplingMode", 2);//1=worst, 2=end
-    significantDigitHumidity = preferences.getUChar("digitHumid", 0);
-    significantDigitTemperature = preferences.getUChar("digitTemp", 0);
-
-
-
-    chartAxisHumidMAX = preferences.getFloat("AxisHumidMAX", 75.0f);//default: 75
-
-
-    COLOR16_chartLineDew    = preferences.getUShort("colDew", 0x7030);//default=purple*/
 
     preferences.end();
     return true;
@@ -304,20 +284,14 @@ void CaptiveRequestHandler::handleRequest(AsyncWebServerRequest *request) {
 
 void handleSaveWifiCredentials(AsyncWebServerRequest *request) {
     if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
-
         char str_ssid[256];
         char str_pwd[256];
         snprintf(str_ssid, sizeof(str_ssid), "%s", request->getParam("ssid", true)->value().c_str());
         snprintf(str_pwd, sizeof(str_pwd), "%s", request->getParam("password", true)->value().c_str());
-
-
         DEBUG_PRINT("Received SSID: "); DEBUG_PRINTLN(str_ssid);
         DEBUG_PRINT("Received Password: "); DEBUG_PRINTLN(str_pwd);
-
-        // Open "wifi-config" namespace in read/write mode
         DEBUG_PRINT("Saving credentials to Flash...");
         if (strlen(str_ssid)>0) {
-
           if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
             preferences.begin("wifi-config", false);
             preferences.putBytes("ssid",    str_ssid, strlen(str_ssid) + 1);//should we check that len is more than 0?
@@ -326,18 +300,12 @@ void handleSaveWifiCredentials(AsyncWebServerRequest *request) {
             xSemaphoreGive(xMutex);
             vTaskDelay(pdMS_TO_TICKS(1000));//wait one more second
           }//mutex
-
-
           DEBUG_PRINTLN("Saved!");
         }
         else{
           DEBUG_PRINTLN("Nothing to save.. empty SSID");
         }        
-
         request->send(200, "text/html", "Settings saved! ESP32 is restarting to connect...");
-        
-        // Give the ESP32 a second to send the response before restarting
-        //delay(2000);
         vTaskDelay(pdMS_TO_TICKS(2000));
         DEBUG_PRINTLN("Requesting a restart");
         if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
@@ -345,7 +313,6 @@ void handleSaveWifiCredentials(AsyncWebServerRequest *request) {
           timer_previousRestart = millis();
           xSemaphoreGive(xMutex);
         }
-        
     } else {
         request->send(400, "text/plain", "Missing SSID or Password");
     }
@@ -360,8 +327,6 @@ void Preferences_deleteWifiCredential(const bool isRestart) {
     xSemaphoreGive(xMutex);
     vTaskDelay(pdMS_TO_TICKS(1000));//wait one more second
   };//mutex
-
-  
   DEBUG_PRINTLN("WiFi Config Deleted!");
   vTaskDelay(pdMS_TO_TICKS(1000));
   if (isRestart) {
@@ -375,21 +340,30 @@ void Preferences_readWifiCredential(char (&str_ssid)[Nssid] , char (&str_pwd)[Np
   str_ssid[Nssid - 1] = '\0';//clear the last character as a safety net
   str_pwd[Npwd - 1] = '\0';//clear the last character as a safety net
   DEBUG_PRINT("Reading WiFi credentials from Flash...");
-
   if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-  preferences.begin("wifi-config", true); // Open in read-only mode
-    len = preferences.getBytes("ssid", str_ssid, Nssid-1);
-    if (len == 0) str_ssid[0] = '\0';//nothing was found, so must ensure the array is empty
-    len = preferences.getBytes("password", str_pwd, Npwd-1);
-    if (len == 0) str_pwd[0] = '\0';//nothing was found, so must ensure the array is empty
-  preferences.end();
+    preferences.begin("wifi-config", true); // Open in read-only mode
+      len = preferences.getBytes("ssid", str_ssid, Nssid-1);
+      if (len == 0) str_ssid[0] = '\0';//nothing was found, so must ensure the array is empty
+      len = preferences.getBytes("password", str_pwd, Npwd-1);
+      if (len == 0) str_pwd[0] = '\0';//nothing was found, so must ensure the array is empty
+    preferences.end();
   xSemaphoreGive(xMutex);
   };//mutex
-
   DEBUG_PRINTLN("Done Reading!");
 }//Preferences_readWifiCredential
 
-
+// Reconnect using credentials stored in NVS, so reconnection works even if the
+// WiFi driver's in-RAM config was lost after an internal watchdog reset.
+void reconnectWifi() {
+  char str_ssid[256] = "";
+  char str_pwd[256]  = "";
+  Preferences_readWifiCredential(str_ssid, str_pwd);
+  if (str_ssid[0] != '\0') {
+    WiFi.begin(str_ssid, str_pwd);
+  } else {
+    WiFi.begin(); // no stored credentials â€” fall back to driver RAM config
+  }
+}
 
 
 void Wifi_connect(const char* str_ssid, const char* str_pwd){
@@ -444,11 +418,13 @@ void SsidScanner(AsyncResponseStream *stream) {
     }//for
   }//for
   // Build the HTML using the sorted indices
+  char ssidBuf[33];
   for (int i = 0; i < n; ++i) {
     int id = indices[i]; // Get the index of the i-th strongest network
-    dbm_to_SignalBars(strBarRSSI,WiFi.RSSI(id));
-    stream->printf("<option value='%s'>%s (%s)%s</option>", 
-            WiFi.SSID(id).c_str(), WiFi.SSID(id).c_str(), strBarRSSI,
+    strlcpy(ssidBuf, WiFi.SSID(id).c_str(), sizeof(ssidBuf)); // one String alloc, then freed
+    dbm_to_SignalBars(strBarRSSI, WiFi.RSSI(id));
+    stream->printf("<option value='%s'>%s (%s)%s</option>",
+            ssidBuf, ssidBuf, strBarRSSI,
             (WiFi.encryptionType(id) == WIFI_AUTH_OPEN ? "" : " 🔒") );
   }//for
   WiFi.scanDelete(); // Free memory
@@ -456,14 +432,12 @@ void SsidScanner(AsyncResponseStream *stream) {
 }//SsidScanner
 
 void StartWifiCaptivePortal(const char *cstr_basic, char* hostname, size_t hostnameLEN) {
-  char str_espID[13];
+  char str_espID[16];
   DEBUG_PRINT("Getting ESP ID...");
   GetESPid(str_espID, sizeof(str_espID));
   DEBUG_PRINTLN(str_espID);
-
   char str_withID[32];
   snprintf(str_withID, sizeof(str_withID), "%s_%s", cstr_basic, str_espID);
-
   WiFi.mode(WIFI_AP);//access point mode WIFI_AP (access point) WIFI_AP_STA (hybrid both access point and normal station)
 #if ASYNCWEBSERVER_WIFI_SUPPORTED
   if (!WiFi.softAP(str_withID)) {
@@ -483,19 +457,17 @@ void StartWifiCaptivePortal(const char *cstr_basic, char* hostname, size_t hostn
   server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request){ request->redirect("/"); });// Apple / iOS
   server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *request){ request->redirect("/"); });// Windows
   server.onNotFound([](AsyncWebServerRequest *request) { request->redirect("/"); });// Generic catch-all (to force the captive portal to show up)
-
   server.on("/scanWifi", HTTP_GET, [](AsyncWebServerRequest *request){
     AsyncResponseStream *stream = request->beginResponseStream("text/html");
     SsidScanner(stream);
     request->send(stream);
   });
-
+  server.on("/mac", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", WiFi.macAddress().c_str());
+  });
   //this handler should be last, it is the captive portal to setup the wifi
   server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);  // only when requested from AP
-  
-  
   snprintf(hostname, hostnameLEN, "%s", str_withID);
-  //return str_withID;
 }//StartWifiCaptivePortal
 
 void fetchWeatherData() {
@@ -503,25 +475,21 @@ void fetchWeatherData() {
     AirportList localCopy;
     bool temp_isApiUseComma = false;
     char temp_api_url[128];
-    char temp_api_keyFlightCategory[8];
-    char temp_api_keyICAOid[8];
     
     if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(100)) == pdTRUE) {//increase from 50 to 100 if too many 'Busy' response
       // copy shared data while locked
       temp_isApiUseComma = isApiUseComma;
       strlcpy(temp_api_url, api_url, sizeof(temp_api_url));
-      strlcpy(temp_api_keyFlightCategory, api_keyFlightCategory, sizeof(temp_api_keyFlightCategory));
-      strlcpy(temp_api_keyICAOid, api_keyICAOid, sizeof(temp_api_keyICAOid));
       localCopy = airportlist;
       xSemaphoreGive(xMutex);
     }//mutex
     if (temp_isApiUseComma == false){//use single fetch
       for (auto& airport : localCopy) {
-        airport.category = fetchWeatherDataSingle(airport.code, temp_api_url, temp_api_keyFlightCategory);
+        airport.category = fetchWeatherDataSingle(airport.code, temp_api_url);
       }//for
     }
     else{//use bundled fetch
-      fetchWeatherDataBundled(localCopy, temp_api_url, temp_api_keyICAOid, temp_api_keyFlightCategory);
+      fetchWeatherDataBundled(localCopy, temp_api_url);
     }
 
     if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(100)) == pdTRUE) {//increase from 50 to 100 if too many 'Busy' response
@@ -550,142 +518,113 @@ void printStreamToSerial(HTTPClient &http)
     }
   DEBUG_PRINTLN("\n--- Response Body End ---");  
 }
-uint8_t fetchWeatherDataSingle(const char*code, const char*baseurl, const char*keyFlightCategory)
+uint8_t fetchWeatherDataSingle(const char*code, const char*baseurl)
 {
+  if (!code) return 0;
+  if (!baseurl) return 0;
+  const char *keyFlightCategory = "fltCat";
   uint8_t return_category=0;
-  char urlBuffer[512];
+  char urlBuffer[256];
   snprintf(urlBuffer, sizeof(urlBuffer), "%s%s", baseurl, code);
-  WiFiClientSecure *client = new WiFiClientSecure;
-  if (!client) {
-    DEBUG_PRINTLN("Failed to allocate WiFiClientSecure");
+  WiFiClientSecure client;
+  client.setInsecure();// Tell the client NOT to check the SSL certificate
+  //client.setCACert(rootCACertificate);
+  HTTPClient http;
+  http.setConnectTimeout(10000);
+  http.setTimeout(30000); // Add read timeout
+  http.addHeader("Connection", "close"); // ensure server closes stream after body, prevents IncompleteInput
+  if (!http.begin(client, urlBuffer)) {
+    DEBUG_PRINTLN("HTTP begin failed");
     return return_category;
   }
-  //client->setInsecure();// Tell the client NOT to check the SSL certificate
-  client->setCACert(rootCACertificate);
-  //client->setCACertBundle(rootcert_crt_bundle_start);//uses predefined cert in NetworkClientSecure.h
-  HTTPClient https;
-  https.setConnectTimeout(5000);
-  https.setTimeout(10000); // Add read timeout
-  if (!https.begin(*client, urlBuffer)) {
-    DEBUG_PRINTLN("HTTPS begin failed");
-    delete client;
-    return return_category;
-  }
-  int httpCode = https.GET();
-  //DEBUG_PRINTF("HTTP GET response for %s: %s\n", code, https.errorToString(httpCode).c_str());
+  int httpCode = http.GET();
+  //DEBUG_PRINTF("HTTP GET response for %s: %s\n", code, http.errorToString(httpCode).c_str());
   if (httpCode == HTTP_CODE_OK) {
 #if MATDEBUG
-      //printStreamToSerial(https);
+      //printStreamToSerial(http);
 #endif
-    JsonDocument *filter = new JsonDocument;
-    if (!filter) {
-      DEBUG_PRINTLN("Failed to allocate filter");
-      https.end();
-      delete client;
-      return return_category;
-    }
-    (*filter)[0][keyFlightCategory] = true;
+    JsonDocument doc;
+    bool parseOK = false;
+    {
+      JsonDocument filter;
+      filter[0][keyFlightCategory] = true;
 
-    yield(); 
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    JsonDocument *doc = new JsonDocument;
-    if (!doc) {
-      DEBUG_PRINTLN("Failed to allocate document");
-      delete filter;
-      https.end();
-      delete client;
-      return return_category;
-    }
-    DeserializationError error = deserializeJson(*doc, https.getStream(), DeserializationOption::Filter(*filter));
-    delete filter;
-
-    if (!error) {
-      const char* cat = nullptr;
-      if (doc->is<JsonArray>()) {
-        // Response is array: [{"flightCategory": "VFR"}]
-        JsonArray arr = doc->as<JsonArray>();
-        if (arr.size() > 0 && arr[0].containsKey(keyFlightCategory)) {
-          cat = arr[0][keyFlightCategory];
-        }
-      } else if (doc->is<JsonObject>()) {
-        // Response is object: {"flightCategory": "VFR"}
-        JsonObject obj = doc->as<JsonObject>();
-        if (obj.containsKey(keyFlightCategory)) {
-          cat = obj[keyFlightCategory];
-        }
+      BlockingStream bs(http.getStream(), 20000);
+      DeserializationError error = deserializeJson(doc, bs, DeserializationOption::Filter(filter));
+      parseOK = !error;
+      if (error) {
+        DEBUG_PRINTF("JSON deserialization failed for [%s]: %s\n", urlBuffer, error.c_str());
       }
 
-      if (cat) {
-        return_category = GetFlightCategory(cat);
-        //DEBUG_PRINTF("%s Category [%s]: %s\n", code, keyFlightCategory, cat);
-        DEBUG_PRINTF("%s is category [%d] (%s)\n", code, return_category, cat);
-      }
-      else{
-        DEBUG_PRINTF("%s: Key '%s' not found in response\n", code, keyFlightCategory);
-      }
-    }//no error
-    else {
-      DEBUG_PRINTF("JSON deserialization failed for %s: %s\n", code, error.c_str());
-    }
-    delete doc; // Clean up document
+    }// filter destroyed here â€” heap pool freed before doc is read
+    if (parseOK) {
+      char cat[6] = {0};
+      strlcpy(cat, doc[0][keyFlightCategory] | "", sizeof(cat));
+
+      return_category = GetFlightCategory(cat);
+
+    }//parseOK
   }//http OK
   else{
-    DEBUG_PRINTF("HTTP GET failed for %s: %d (%s)\n", code, httpCode, https.errorToString(httpCode).c_str());
+    DEBUG_PRINTF("HTTP GET failed for %s: %d (%s)\n", code, httpCode, http.errorToString(httpCode).c_str());
   }
-  https.end();
-  delete client; // Clean up memory
+  http.end();
   return return_category;
 }//fetchWeatherDataSingle
-void fetchWeatherDataBundled(AirportList &list, const char*baseurl, const char*keyICAOid, const char*keyFlightCategory)
+void fetchWeatherDataBundled(AirportList &list, const char*baseurl)
 {
+  if (!baseurl) return;
+  const char *keyICAOid = "icaoId";
+  const char *keyFlightCategory = "fltCat";
   size_t airportCount = list.size();
   if (airportCount < 1) return;
   //build big boy url
   char urlBuffer[512]; 
   int pos = snprintf(urlBuffer, sizeof(urlBuffer), "%s", baseurl);
   for (size_t i = 0; i < airportCount; i++) {
-    pos += snprintf(urlBuffer + pos, sizeof(urlBuffer) - pos, "%s%s", 
-                    list[i].code, (i < airportCount - 1) ? "," : "");
-    if (pos >= (int)sizeof(urlBuffer) - 1) break; // Safety check
     list[i].category = 0; //reset category before fetching new data
   }//for
 
-  WiFiClientSecure *client = new WiFiClientSecure;
-  if (!client) {
-    DEBUG_PRINTLN("Failed to allocate WiFiClientSecure");
+  for (size_t i = 0; i < airportCount; i++) {
+    if (pos >= (int)sizeof(urlBuffer) - 1) break; // Safety check, here so as not to add a comma
+    pos += snprintf(urlBuffer + pos, sizeof(urlBuffer) - pos, "%s%s", 
+                    list[i].code, (i < airportCount - 1) ? "," : "");
+  }//for
+
+  WiFiClientSecure client;
+  client.setInsecure();// Tell the client NOT to check the SSL certificate
+  //client.setCACert(rootCACertificate);
+  HTTPClient http;
+  http.setConnectTimeout(10000);
+  http.setTimeout(30000); // Add read timeout
+  http.addHeader("Connection", "close"); // ensure server closes stream after body, prevents IncompleteInput
+  if (!http.begin(client, urlBuffer)) {
+    DEBUG_PRINTLN("HTTP begin failed");
     return;
   }
-  //client->setInsecure();// Tell the client NOT to check the SSL certificate
-  client->setCACert(rootCACertificate);
-  //client->setCACertBundle(rootcert_crt_bundle_start);//uses predefined cert in NetworkClientSecure.h
-  HTTPClient https;
-  https.setConnectTimeout(5000);
-  https.setTimeout(10000); // Add read timeout
-  if (!https.begin(*client, urlBuffer)) {
-    DEBUG_PRINTLN("HTTPS begin failed");
-    delete client;
-    return;
-  }
-  int httpCode = https.GET();
+  int httpCode = http.GET();
   if (httpCode == HTTP_CODE_OK) {
 #if MATDEBUG
       //printStreamToSerial(https);
 #endif
-    JsonDocument *filter = new JsonDocument;// Allocate filter on heap to avoid stack overflow with large airport lists
-    (*filter)[0][keyICAOid] = true;
-    (*filter)[0][keyFlightCategory] = true;
+    JsonDocument doc;
+    bool parseOK = false;
+    {
+      JsonDocument filter;
+      filter[0][keyICAOid] = true;
+      filter[0][keyFlightCategory] = true;
 
-    yield(); 
-    vTaskDelay(pdMS_TO_TICKS(10));
+      BlockingStream bs(http.getStream(), 20000);
+      DeserializationError error = deserializeJson(doc, bs, DeserializationOption::Filter(filter));
+      parseOK = !error;
+      if (error) {
+        DEBUG_PRINTF("JSON deserialization failed for [%s]: %s\n", urlBuffer, error.c_str());
+      }
 
-    JsonDocument *doc = new JsonDocument;// Allocate main document on heap with specific size
-    DeserializationError error = deserializeJson(*doc, https.getStream(), DeserializationOption::Filter(*filter));
-    delete filter; // Clean up filter memory
-
-    if (!error) {
-      if (doc->is<JsonArray>()) {
-        JsonArray array = doc->as<JsonArray>();
+    }// filter destroyed here â€” heap pool freed before doc is read
+    if (parseOK) {
+      if (doc.is<JsonArray>()) {
+        JsonArray array = doc.as<JsonArray>();
         for (JsonObject incoming : array) {
           yield();// Feed watchdog during long loops
           if (!incoming.containsKey(keyICAOid) || !incoming.containsKey(keyFlightCategory)) {
@@ -694,29 +633,29 @@ void fetchWeatherDataBundled(AirportList &list, const char*baseurl, const char*k
           const char* incomingId = incoming[keyICAOid];
           const char* incomingCat = incoming[keyFlightCategory];
           processSingleAirport(incomingId, incomingCat, list);
-          
-        }//for JsonObject
-      } else if (doc->is<JsonObject>()) {
-        // Handle single airport object (one result)
-        JsonObject obj = doc->as<JsonObject>();
+        }//for JsonArray
+      }//JsonArray
+      else if (doc.is<JsonObject>()) {
+        JsonObject obj = doc.as<JsonObject>();
         if (obj.containsKey(keyICAOid) && obj.containsKey(keyFlightCategory)) {
           const char* incomingId = obj[keyICAOid];
           const char* incomingCat = obj[keyFlightCategory];
           processSingleAirport(incomingId, incomingCat, list);
-        } else {
+        }
+        else {
           DEBUG_PRINTLN("JsonObject missing required fields");
         }//else
-      } else {
+      }//only one element
+      else {
         DEBUG_PRINTLN("Unexpected JSON type (neither array nor object)");
-      }//else
-    }
-    else {
-      DEBUG_PRINTF("JSON deserialization failed: %s\n", error.c_str());
-    }
-    delete doc;
+      }//els
+
+    }//parseOK
   }//http OK
-  https.end();
-  delete client; // Clean up memory
+  else{
+    DEBUG_PRINTF("HTTP GET failed : %d (%s)\n",  httpCode, http.errorToString(httpCode).c_str());
+  }
+  http.end();
 }//fetchWeatherDataBundled
 
 
@@ -757,7 +696,52 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
     request->send(200, "text/plain", "pong");
   });
 
-  
+  server.on("/time", HTTP_GET, [](AsyncWebServerRequest *request){//method just to test the time function and display time on the webpage
+        struct tm timeinfo;
+        if(!getLocalTime(&timeinfo, 10)) {// Use a 0ms or very small (10ms) timeout. If the time is set, it returns instantly. If it's NOT set, it won't hang your server for 10 seconds.
+            request->send(200, "text/plain", "Time Syncing Error...");
+            return;
+        }
+        char buffer[32];
+        strftime(buffer, sizeof(buffer), "%H:%M:%S %Z", &timeinfo);
+        AsyncResponseStream *stream = request->beginResponseStream("text/html"); 
+        stream->printf(buffer);
+        request->send(stream);
+      });
+
+  server.on("/api/check-crash", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "application/json", "{\"crashed\":false}");// Just send a "no crash" response for now
+    return;
+    AsyncResponseStream *stream = request->beginResponseStream("application/json");
+    stream->print("{");// 1. Start the main JSON Object
+    if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (LittleFS.exists(filename_crash_report)) {
+        File file = LittleFS.open(filename_crash_report, "r");
+        if (file && file.size() >= sizeof(CrashData)) {
+          file.seek(file.size() - sizeof(CrashData));// Seek to the very last record in the file
+          CrashData lastRecord;
+          file.read((uint8_t*)&lastRecord, sizeof(CrashData));
+          file.close();
+          stream->print("\"crashed\":true,");
+          stream->printf("\"reason\":%d,", lastRecord.reasonCode);
+          stream->printf("\"frag\":%.1f,", lastRecord.fragmentation);
+          stream->printf("\"time\":%u,", lastRecord.uptimeMillis);
+          stream->printf("\"message\":\"%s\",", lastRecord.message);
+          stream->printf("\"taskName\":\"%s\"", lastRecord.taskName);//no coma for the last
+        }//if
+        else{ stream->print("\"crashed\":false"); }
+      }//if file
+      else { stream->print("\"crashed\":false"); }
+      xSemaphoreGive(xMutex);
+    }//mutex
+    else { stream->print("\"error\":\"Mutex Timeout\"");  }
+    stream->print("}");
+    request->send(stream);
+  });///api/check-crash
+
+
+
+
   //the following line is for a dashboard, and can be ommitted if the device does not need to show data or take input from/to user:
   server.on("/fetchAirports", HTTP_GET, [](AsyncWebServerRequest *request) {
       AsyncResponseStream *stream = request->beginResponseStream("application/json");
@@ -775,11 +759,7 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
         uint8_t temp_resetHour = reset_localHour;
         uint8_t temp_resetMinute = reset_localMinute;
         char temp_api_url[128];
-        char temp_api_keyFlightCategory[8];
-        char temp_api_keyICAOid[8];
         strlcpy(temp_api_url, api_url, sizeof(temp_api_url));
-        strlcpy(temp_api_keyFlightCategory, api_keyFlightCategory, sizeof(temp_api_keyFlightCategory));
-        strlcpy(temp_api_keyICAOid, api_keyICAOid, sizeof(temp_api_keyICAOid));
         localCopy = airportlist;
         xSemaphoreGive(xMutex);
 
@@ -792,8 +772,6 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
         stream->printf("\"resetMinute\":%d,", temp_resetMinute);
         stream->printf("\"isApiUseComma\":%s,", temp_isApiUseComma ? "true" : "false");
         stream->printf("\"api_url\":\"%s\",", temp_api_url);
-        stream->printf("\"api_keyFlightCategory\":\"%s\",", temp_api_keyFlightCategory);
-        stream->printf("\"api_keyICAOid\":\"%s\",", temp_api_keyICAOid);
         stream->print("\"codes\":[");
         for (size_t i = 0; i < localCopy.size(); i++) {
             stream->printf("\"%s\"", localCopy[i].code);
@@ -821,6 +799,10 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
               request->send(507, "text/plain", "Insufficient Storage");
               return;
           }
+          // Free the buffer if the client disconnects before the last chunk arrives
+          request->onDisconnect([request]() {
+              if (request->_tempObject) { free(request->_tempObject); request->_tempObject = nullptr; }
+          });
       }
       //Safety Check: Don't write if malloc failed
       if (request->_tempObject == nullptr) return;
@@ -837,8 +819,6 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
         bool temp_isApiUseComma = false;
         bool temp_isResetDaily = false;
         char temp_api_url[128] = {0};
-        char temp_api_keyFlightCategory[8] = {0};
-        char temp_api_keyICAOid[8] = {0};
         AirportList localCopy;
 
         bool parseSuccess = false;
@@ -866,12 +846,6 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
             const char* url = doc["apiUrl"] | "";
             strlcpy(temp_api_url, url, sizeof(temp_api_url));
 
-            const char* keyFC = doc["apiKeyFlightCategory"] | "";
-            strlcpy(temp_api_keyFlightCategory, keyFC, sizeof(temp_api_keyFlightCategory));
-
-            const char* keyICAO = doc["apiKeyICAOid"] | "";
-            strlcpy(temp_api_keyICAOid, keyICAO, sizeof(temp_api_keyICAOid));
-
             parseSuccess = true;
 
         }//if
@@ -894,8 +868,6 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
           reset_localHour = temp_resetHour;
           reset_localMinute = temp_resetMinute;
           strlcpy(api_url, temp_api_url, sizeof(api_url));
-          strlcpy(api_keyFlightCategory, temp_api_keyFlightCategory, sizeof(api_keyFlightCategory));
-          strlcpy(api_keyICAOid, temp_api_keyICAOid, sizeof(api_keyICAOid));
           xSemaphoreGive(xMutex);
           DEBUG_PRINTLN("Done!");
 
@@ -917,69 +889,15 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
       });
 
   // Handle disconnects/leaks
-server.onNotFound([](AsyncWebServerRequest *request) {
-    // If the request is destroyed but _tempObject isn't null, free it
-    if (request->_tempObject != nullptr) {
-        free(request->_tempObject);
-        request->_tempObject = nullptr;
-    }
-    request->redirect("/");
-});
+  server.onNotFound([](AsyncWebServerRequest *request) {
+      // If the request is destroyed but _tempObject isn't null, free it
+      if (request->_tempObject != nullptr) {
+          free(request->_tempObject);
+          request->_tempObject = nullptr;
+      }
+      request->redirect("/");
+  });
   
-
-  server.on("/time", HTTP_GET, [](AsyncWebServerRequest *request){//method just to test the time function and display time on the webpage
-        struct tm timeinfo;
-        if(!getLocalTime(&timeinfo, 10)) {// Use a 0ms or very small (10ms) timeout. If the time is set, it returns instantly. If it's NOT set, it won't hang your server for 10 seconds.
-            request->send(200, "text/plain", "Time Syncing Error...");
-            return;
-        }
-        char buffer[32];
-        strftime(buffer, sizeof(buffer), "%H:%M:%S %Z", &timeinfo);
-        AsyncResponseStream *stream = request->beginResponseStream("text/html"); 
-        stream->printf(buffer);
-        request->send(stream);
-      });
-
-  
-  server.on("/api/check-crash", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "application/json", "{\"crashed\":false}");// Just send a "no crash" response for now
-    return;
-
-    AsyncResponseStream *stream = request->beginResponseStream("application/json");
-    stream->print("{");// 1. Start the main JSON Object
-
-    if (xSemaphoreTake(xMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      if (LittleFS.exists(filename_crash_report)) {
-        File file = LittleFS.open(filename_crash_report, "r");
-        if (file && file.size() >= sizeof(CrashData)) {
-          file.seek(file.size() - sizeof(CrashData));// Seek to the very last record in the file
-          CrashData lastRecord;
-          file.read((uint8_t*)&lastRecord, sizeof(CrashData));
-          file.close();
-
-          stream->print("\"crashed\":true,");
-          stream->printf("\"reason\":%d,", lastRecord.reasonCode);
-          stream->printf("\"frag\":%.1f,", lastRecord.fragmentation);
-          stream->printf("\"time\":%u,", lastRecord.uptimeMillis);
-          stream->printf("\"message\":\"%s\",", lastRecord.message);
-          stream->printf("\"taskName\":\"%s\"", lastRecord.taskName);//no coma for the last
-        }//if
-        else{
-          stream->print("\"crashed\":false");//no coma for the last
-        }
-      }//if file
-      else {
-        stream->print("\"crashed\":false");//no coma for the last
-      }//else file
-      xSemaphoreGive(xMutex);
-    }//mutex
-    else {
-      stream->print("\"error\":\"Mutex Timeout\"");//no coma for the last
-    }
-    stream->print("}");
-    request->send(stream);
-  });///api/check-crash
-
   server.on("/", HTTP_GET, handleRoot);//the main page
 
 }//SetupWifiNormalMode
@@ -997,6 +915,7 @@ bool SetupWifiConnect(const char *cstr_basic, char* hostname, size_t hostnameLEN
   //Preferences_deleteWifiCredential(false);//delete credential for test
 
   Preferences_readWifiCredential(strSSID,strPWD);
+  DEBUG_PRINTF("Loaded SSID: [%s] (len=%u)\n", strSSID, strlen(strSSID));
   Wifi_connect(strSSID, strPWD);
 
   EventBits_t bits = xEventGroupWaitBits(

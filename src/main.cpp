@@ -124,7 +124,7 @@ void setup() {
   timer_previousWifiRSSI=0L;
   timer_previousWeatherFetch=0L;
 
-  pinMode(PIN_DIMMER, INPUT_PULLUP);
+  pinMode(PIN_DIMMER, INPUT);//INPUT  INPUT_PULLUP
   pinMode(PIN_SWITCH, INPUT);
   analogSetAttenuation(ADC_11db);//less accurate but also les noisy.
   
@@ -175,19 +175,7 @@ void setup() {
     xSemaphoreGive(xMutex);
   }
 
-  // Create a task that will run the main logic function
-  DEBUG_PRINTLN("|||>->-> Creating Task for CORE-1... ");
-  xTaskCreatePinnedToCore(
-    MainCore1,          // Function to implement the task 
-    "Core1Task",       // Name of the task 
-    8192,            // Stack size in words 8192=8kb 16384=16kb 
-    NULL,             // Task input parameter 
-    2,                // Priority of the task (higher is more important) 
-    &MainCode1Task,    // Task handle 
-    1);               // Core where the task should run (Core 1) 
-  DEBUG_PRINTF("MainCode1Task stack free/requested: %u/8192\n", uxTaskGetStackHighWaterMark(MainCode1Task));//if < 500bytes, increase stack
   
-
   DEBUG_PRINTLN("|||>->-> Creating Task for CORE-0...");
     xTaskCreatePinnedToCore(
     heapMonitorTask,          // Function to implement the task 
@@ -209,6 +197,17 @@ void setup() {
     0);               // Core where the task should run (Core 0, which is the same as WiFi and that's ok for this) 
   DEBUG_PRINTF("RSSICode0Task stack free/requested: %u/4096\n", uxTaskGetStackHighWaterMark(RSSICode0Task));//if < 500bytes, increase stack
 
+  // Create a task that will run the main logic function
+  DEBUG_PRINTLN("|||>->-> Creating Task for CORE-1... ");
+  xTaskCreatePinnedToCore(
+    MainCore1,          // Function to implement the task 
+    "Core1Task",       // Name of the task 
+    8192,            // Stack size in words 8192=8kb 16384=16kb 
+    NULL,             // Task input parameter 
+    2,                // Priority of the task (higher is more important) 
+    &MainCode1Task,    // Task handle 
+    1);               // Core where the task should run (Core 1) 
+  DEBUG_PRINTF("MainCode1Task stack free/requested: %u/8192\n", uxTaskGetStackHighWaterMark(MainCode1Task));//if < 500bytes, increase stack
 
   DEBUG_PRINTLN("* * * --> INITIALIZATION COMPLETE <-- * * *");
 
@@ -235,6 +234,13 @@ void MainCore1(void * pvParameters) {
   bool gotFreshWeatherData=false;
   uint8_t flightCode = 0;
   uint8_t colorCode = 0;
+
+  // analogReadMilliVolts applies ESP32 factory ADC calibration (linearizes the curve).
+      // DIMMER_MV_LOW/HIGH are the actual mV measured at the pot's physical endpoints
+      // (pot never swings full rail-to-rail due to 220Ω series resistor + end-stop resistance).
+      // Adjust these two constants if the real-world min/max output shifts.
+      static constexpr int DIMMER_MV_LOW  = 140;  // mV at pot fully CCW  → brightness 20
+      static constexpr int DIMMER_MV_HIGH = 3155; // mV at pot fully CW   → brightness 255
 
   unsigned long timer1_previousDimmer = millis();
   unsigned long timer1_previousResetChecker = millis();
@@ -288,16 +294,23 @@ void MainCore1(void * pvParameters) {
 
     if ( (unsigned long)(timer1_now - timer1_previousDimmer) >= timer1Dimmer_delay){
       timer1_previousDimmer = timer1_now;
-
-      dim_pin = analogRead(PIN_DIMMER); dimmer_value = map(dim_pin, 0, 4095, 20, 255); // 0 4095 DIM_MIN, DIM_MAX
-
+      
       switch_option = digitalRead(PIN_SWITCH);
       if ( switch_old != switch_option){
         switch_old = switch_option;
         DEBUG_PRINTF("Switch: %d\n", switch_option);
       }
 
-      //ws2818_leds.setBrightness(dimmer_value);
+      dim_pin = analogReadMilliVolts(PIN_DIMMER);
+      dimmer_value = constrain(map(dim_pin, DIMMER_MV_LOW, DIMMER_MV_HIGH, 255, 20), 20, 255);
+      if ( dimmer_old != dimmer_value){
+        dimmer_old = dimmer_value;
+        //DEBUG_PRINTF("Dimmer: %d (%d mV)\n", dimmer_value, dim_pin);
+        ws2818_leds.setBrightness(dimmer_value);
+        //ledStatus.setBrightness(dimmer_value); ledStatus.turnON();
+        
+      }
+
     }//if
 
     

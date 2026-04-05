@@ -5,7 +5,6 @@
 
 #include <Arduino.h>
 #include <cstring>
-#include <unordered_set>
 #include <algorithm> // for std::remove_if
 #include <inttypes.h>
 #include <rom/rtc.h>
@@ -78,11 +77,12 @@ enum {
 struct Airport{
     char code[6];
     uint8_t category;
-    Airport(const char* c = "", const uint8_t cat=0) : code{}, category(cat) {
-        std::memset(code, 0, sizeof(code));
-        if (c) {
-            std::strncpy(code, c, sizeof(code) - 1);
-        }
+    bool isTFR;
+    Airport(const char* c = "", const uint8_t cat=0) : 
+            code{}, 
+            category(cat), isTFR(false) 
+    {
+        if (c) strlcpy(code, c, sizeof(code) );
     }
 };
 using AirportList = std::vector<Airport>;
@@ -90,8 +90,6 @@ using AirportList = std::vector<Airport>;
 extern AirportList airportlist;
 extern uint8_t i_timeZone;
 extern char api_url[128];
-extern char api_keyFlightCategory[8];
-extern char api_keyICAOid[8];
 extern bool isApiUseComma;
 extern bool isResetDaily;
 extern uint8_t reset_localHour;

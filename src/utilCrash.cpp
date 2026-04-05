@@ -105,7 +105,7 @@ bool readCrashLog(CrashData &crashRecord, const char *filename) {
       size_t readBytes = file.read((uint8_t*)&tempRecord, sizeof(CrashData));
       if (readBytes == sizeof(CrashData)) {
         count++;
-        /*DEBUG_PRINTF("Record #%d | Task: %s | Reason: %d | Heap: %u | Frag: %.1f | Message: %s\n", 
+        /*DEBUG_PRINTF("Record #%d | Task: %s | Reason: %d | Heap: %u | Frag: %.1f | Message: %s\n",
                           count, tempRecord.taskName, tempRecord.reasonCode, tempRecord.freeHeap, tempRecord.fragmentation, tempRecord.message);*/
       }
     }//while
@@ -113,7 +113,7 @@ bool readCrashLog(CrashData &crashRecord, const char *filename) {
     xSemaphoreGive(filesystemMutex);
   } else{
     DEBUG_PRINTLN("Read Crash Log ABORTED: filesystemMutex timeout");
-    return false; 
+    return false;
   }
   crashRecord = tempRecord;
   if (count == 0) { DEBUG_PRINTLN("File exists but contains no valid records."); }
@@ -152,7 +152,7 @@ void setupCrashInitBoot() {
     readCrashLog(tempRecord, filename_crash_report);
 
     DEBUG_PRINTLN("|<--- CRASH REPORT END --->|");
-    
+
     // Clear the flag so we don't read it again next time
     hasCrashFlag = false;
   } else {
@@ -170,7 +170,7 @@ void triggerCrashReport(uint8_t code, const char* logMsg) {
   // Get the name of the current running task
   char* currentTask = pcTaskGetName(nullptr);
   //memset(crashLog.taskName, 0, sizeof(crashLog.taskName));
-  strncpy(crashLog.taskName, currentTask ? currentTask : "Unknown", sizeof(crashLog.taskName)-1);
+  strlcpy(crashLog.taskName, currentTask ? currentTask : "Unknown", sizeof(crashLog.taskName));
 
   crashLog.freeHeap = ESP.getFreeHeap();
   //crashLog.fragmentation = 100.0f * ((float)ESP.getMaxAllocHeap() / ESP.getFreeHeap());
@@ -178,7 +178,7 @@ void triggerCrashReport(uint8_t code, const char* logMsg) {
   crashLog.uptimeMillis = millis();
 
   //memset(crashLog.message, 0, sizeof(crashLog.message));
-  strncpy(crashLog.message, logMsg ? logMsg : "", sizeof(crashLog.message) - 1);
+  strlcpy(crashLog.message, logMsg ? logMsg : "", sizeof(crashLog.message));
 
   DEBUG_PRINTLN("Saving crash report and restarting...");
 
@@ -186,14 +186,14 @@ void triggerCrashReport(uint8_t code, const char* logMsg) {
   delay(50);
   DEBUG_PRINTLN("bye");
   DEBUG_FLUSH; // Ensure the serial message is sent
-  
+
   ESP.restart();
 }//triggerCrashReport
 
 //frag check+trigger
 void checkMemoryHealth(const float &maxFrag) {
   size_t totalFree = ESP.getFreeHeap();
-  size_t largestBlock = ESP.getMaxAllocHeap(); 
+  size_t largestBlock = ESP.getMaxAllocHeap();
   //float fragmentation = 100.0 * ((float)largestBlock / totalFree);
   float fragmentation = 100.0f * (1.0f - ((float)largestBlock / (float)totalFree));//large value (higher than 80.0) is bad
 
@@ -225,7 +225,7 @@ void checkHeapGuardianHealth(const unsigned long &idleTreshold) {
         lastHeartbeat_Heap = heapGuardHeartbeat;
         lastChangeTime_Heap = now;
         return;
-    } 
+    }
     if (lastChangeTime_Heap == 0) {
       lastChangeTime_Heap = now;
       return;

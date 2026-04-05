@@ -16,7 +16,6 @@
 #include "utilFile.h"
 #include "contentHTMLportal.h"
 #include "contentHTMLroot.h"
-#include "certificate_weather.h"
 
 
 extern DNSServer dnsServer;
@@ -49,8 +48,8 @@ void triggerTaskSavePreference(uint32_t delayMS);
 bool loadPreferences();
 
 void fetchWeatherData();
-uint8_t fetchWeatherDataSingle(const char*code, const char*baseurl, const char*keyFlightCategory);
-void fetchWeatherDataBundled(AirportList &list, const char*baseurl, const char*keyICAOid, const char*keyFlightCategory);
+uint8_t fetchWeatherDataSingle(const char*code, const char*baseurl);
+void fetchWeatherDataBundled(AirportList &list, const char*baseurl);
 void printStreamToSerial(HTTPClient &http);
 void processSingleAirport(const char* incomingId, const char* incomingCat, AirportList &list);
 

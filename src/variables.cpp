@@ -21,8 +21,6 @@ char charDeviceName[32]; //will contain the hostname plus the EID appended to it
 AirportList airportlist;
 uint8_t i_timeZone=0;
 char api_url[128];
-char api_keyFlightCategory[8];
-char api_keyICAOid[8];
 bool isApiUseComma;
 bool isResetDaily;
 uint8_t reset_localHour;
@@ -30,14 +28,14 @@ uint8_t reset_localMinute;
 
 void RemoveRedundantAirports(AirportList &list)
 {
-    std::unordered_set<std::string> seenCodes;
     AirportList uniqueList;
-    uniqueList.reserve(list.size()); // Pre-allocate to avoid reallocation
-
+    uniqueList.reserve(list.size());
     for (const auto& airport : list) {
-        if (seenCodes.insert(airport.code).second) {
-            uniqueList.push_back(airport);
+        bool found = false;
+        for (const auto& u : uniqueList) {
+            if (strncmp(airport.code, u.code, sizeof(u.code)) == 0) { found = true; break; }
         }
+        if (!found) uniqueList.push_back(airport);
     }
     list = std::move(uniqueList);
 }//RemoveRedundantAirports
