@@ -787,11 +787,10 @@ void SetupWifiNormalMode(const char *cstr_basic, char* hostname, size_t hostname
         stream->printf("\"deviceName\":\"%s\",", deviceName);
         stream->printf("\"fwVersion\":\"%s\",", fw);
         stream->printf("\"timezone\":\"%d\",", temp_timeZone);
-        stream->printf("\"isApiUseComma\":%s,", temp_isApiUseComma ? "true" : "false");
         stream->printf("\"isResetDaily\":%s,", temp_isResetDaily ? "true" : "false");
         stream->printf("\"resetHour\":%d,", temp_resetHour);
         stream->printf("\"resetMinute\":%d,", temp_resetMinute);
-        stream->printf("\"timezone\":\"%d\",", temp_timeZone);
+        stream->printf("\"isApiUseComma\":%s,", temp_isApiUseComma ? "true" : "false");
         stream->printf("\"api_url\":\"%s\",", temp_api_url);
         stream->printf("\"api_keyFlightCategory\":\"%s\",", temp_api_keyFlightCategory);
         stream->printf("\"api_keyICAOid\":\"%s\",", temp_api_keyICAOid);
@@ -924,6 +923,7 @@ server.onNotFound([](AsyncWebServerRequest *request) {
         free(request->_tempObject);
         request->_tempObject = nullptr;
     }
+    request->redirect("/");
 });
   
 
@@ -982,10 +982,6 @@ server.onNotFound([](AsyncWebServerRequest *request) {
 
   server.on("/", HTTP_GET, handleRoot);//the main page
 
-  server.onNotFound([](AsyncWebServerRequest *request){
-    request->redirect("/");
-  });
-  
 }//SetupWifiNormalMode
 
 //return true means it is connected to the internet, return false means it created the captive portal
